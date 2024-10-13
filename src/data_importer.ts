@@ -21,7 +21,7 @@ import chalk from 'chalk';
 dotenv.config();
 
 const logger = winston.createLogger({
-  level: 'info',
+  level: 'debug',
   format: winston.format.combine(
     winston.format.timestamp(),
     winston.format.printf(({ timestamp, level, message }) => {
@@ -57,13 +57,11 @@ program
   .version('1.0.0')
   .description('PostgreSQL Data Importer')
   .option('-t, --type <fileType>', 'Type of files to import (json, csv)', '')
-  .option('--no-ssl', 'Disable SSL for PostgreSQL connection', true)
-  .option('--reject-unauthorized', 'Reject unauthorized SSL certificates (default: false)', false)
+  .option('--ssl', 'Disable SSL for PostgreSQL connection (default: false)', true)
+  .option('--reject-unauthorized', 'Reject unauthorized SSL certificates (default: false)', true)
   .parse(process.argv);
 
 const options = program.opts();
-
-logger.info(`SSL options - SSL Disabled: ${options.noSsl}, Reject Unauthorized: ${options.rejectUnauthorized}`);
 
 const pgPoolConfig: any = {
   host: process.env.PG_HOST,
@@ -73,9 +71,19 @@ const pgPoolConfig: any = {
   port: Number(process.env.PG_PORT),
 };
 
-if (options.noSsl == false) {
+
+// Correct handling of SSL flag
+if (options.ssl === true) {
   pgPoolConfig.ssl = { rejectUnauthorized: options.rejectUnauthorized };
+  if (options.rejectUnauthorized === true) {
+    logger.warn(`Reject unauthorized is set to true for db SSL cert, don't use this in production.`);
+  }
+} else {
+  pgPoolConfig.ssl = false;  // Disable SSL explicitly if --no-ssl is true
 }
+logger.debug(`PostgreSQL password type: ${typeof process.env.PG_PASS}`);
+
+logger.info(`SSL options - SSL : ${options.ssl}, Reject Unauthorized: ${options.rejectUnauthorized}`);
 
 const pgPool = new PgPool(pgPoolConfig);
 
@@ -147,10 +155,13 @@ async function checkPgConnection(): Promise<void> {
     client.release();
   } catch (err) {
     if (err instanceof Error) {
-      if (err.message.includes('does not support SSL')) {
+      const errorMsg = err.message.toLowerCase();
+      if (errorMsg.includes('does not support ssl')) {
         logger.error(`PostgreSQL connection error: ${err.message}. The server does not support SSL connections. Please use the --no-ssl flag to disable SSL.`);
-      } else if (err.message.includes('self signed certificate') || err.message.includes('certificate')) {
+      } else if (errorMsg.includes('self signed certificate') || errorMsg.includes('certificate')) {
         logger.error(`PostgreSQL connection error: ${err.message}. The server's SSL certificate is not authorized. Please use the --reject-unauthorized flag to accept unauthorized certificates.`);
+      } else if (errorMsg.includes('no pg_hba.conf entry')) {
+        logger.error(`PostgreSQL connection error: ${err.message}. This indicates that the server requires an SSL-encrypted connection. Please ensure SSL is enabled and consider using the --reject-unauthorized flag if you're using self-signed certificates.`);
       } else {
         logger.error(`PostgreSQL connection error: ${err.message}`);
       }
