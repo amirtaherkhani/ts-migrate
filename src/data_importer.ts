@@ -47,19 +47,37 @@ const logger = winston.createLogger({
   ],
 });
 
-
 // ============================
 /* Step 3: Configure PostgreSQL and MySQL Connection Pools */
 // ============================
 
-const pgPool = new PgPool({
+const program = new Command();
+
+program
+  .version('1.0.0')
+  .description('PostgreSQL Data Importer')
+  .option('-t, --type <fileType>', 'Type of files to import (json, csv)', '')
+  .option('--no-ssl', 'Disable SSL for PostgreSQL connection', true)
+  .option('--reject-unauthorized', 'Reject unauthorized SSL certificates (default: false)', false)
+  .parse(process.argv);
+
+const options = program.opts();
+
+logger.info(`SSL options - SSL Disabled: ${options.noSsl}, Reject Unauthorized: ${options.rejectUnauthorized}`);
+
+const pgPoolConfig: any = {
   host: process.env.PG_HOST,
   user: process.env.PG_USER,
   password: process.env.PG_PASS,
   database: process.env.PG_DB_NAME,
   port: Number(process.env.PG_PORT),
-  ssl: { rejectUnauthorized: false } // Force SSL and allow self-signed certificates
-});
+};
+
+if (options.noSsl == false) {
+  pgPoolConfig.ssl = { rejectUnauthorized: options.rejectUnauthorized };
+}
+
+const pgPool = new PgPool(pgPoolConfig);
 
 const mysqlPool = mysql.createPool({
   host: process.env.MYSQL_DB_HOST,
@@ -90,16 +108,6 @@ const exportDir = path.resolve(__dirname, '..', 'exported_data');
 /* Step 5: Define Command-Line Interface (CLI) */
 // ============================
 
-const program = new Command();
-
-program
-  .version('1.0.0')
-  .description('PostgreSQL Data Importer')
-  .option('-t, --type <fileType>', 'Type of files to import (json, csv)', '')
-  .parse(process.argv);
-
-const options = program.opts();
-
 const fileType = options.type;  // This will give you the value of --type
 const validTypes = ['json', 'csv'];
 if (!validTypes.includes(fileType)) {
@@ -113,12 +121,22 @@ logger.info(`File type specified: ${fileType}`);
 /* Step 6: Utility Functions */
 // ============================
 
+
+function isValidJson(value: any): boolean {
+  try {
+    JSON.parse(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+
 // Function to check PostgreSQL connection
 async function checkPgConnection(): Promise<void> {
   logger.info('Checking PostgreSQL connection...');
-  const client: PgPoolClient = await pgPool.connect();
-
   try {
+    const client: PgPoolClient = await pgPool.connect();
     const res: QueryResult = await client.query('SELECT 1');
     if (res.rowCount === 1) {
       logger.info('PostgreSQL connection successful.');
@@ -126,11 +144,20 @@ async function checkPgConnection(): Promise<void> {
       logger.error('PostgreSQL connection failed.');
       process.exit(1);
     }
-  } catch (err) {
-    logger.error(`PostgreSQL connection error: ${err instanceof Error ? err.message : err}`);
-    process.exit(1);
-  } finally {
     client.release();
+  } catch (err) {
+    if (err instanceof Error) {
+      if (err.message.includes('does not support SSL')) {
+        logger.error(`PostgreSQL connection error: ${err.message}. The server does not support SSL connections. Please use the --no-ssl flag to disable SSL.`);
+      } else if (err.message.includes('self signed certificate') || err.message.includes('certificate')) {
+        logger.error(`PostgreSQL connection error: ${err.message}. The server's SSL certificate is not authorized. Please use the --reject-unauthorized flag to accept unauthorized certificates.`);
+      } else {
+        logger.error(`PostgreSQL connection error: ${err.message}`);
+      }
+    } else {
+      logger.error(`PostgreSQL connection error: ${err}`);
+    }
+    process.exit(1);
   }
 }
 
@@ -201,9 +228,6 @@ function isFileEmpty(filePath: string): boolean {
   const stats = fs.statSync(filePath);
   return stats.size === 0; // Check if file size is 0 bytes
 }
-
-
-
 
 // ============================
 /* Step 7: Foreign Key Dependency Handling */
@@ -282,6 +306,7 @@ function topologicalSort(tables: string[], dependencies: Map<string, Set<string>
 // ============================
 /* Step 8: Schema Validation and Data Import */
 // ============================
+
 
 async function validateAndImportSchemas(tables: string[], mysqlTables: Set<string>): Promise<void> {
   logger.info('Starting schema validation and data import process for MySQL tables and files');
@@ -373,8 +398,6 @@ async function validateAndImportSchemas(tables: string[], mysqlTables: Set<strin
   }
 }
 
-
-
 // ============================
 /* Step 9: Data Import Function */
 // ============================
@@ -409,23 +432,8 @@ async function importData(pgClient: PgPoolClient, tableName: string, columns: st
     return;
   }
 
-  // Create a map of exported columns to PostgreSQL columns
-  const columnMapping = new Map<string, string>();
-  columns.forEach((pgCol) => {
-    const matchingFileCol = data[0] ? Object.keys(data[0]).find((col) => col.toLowerCase() === pgCol.toLowerCase()) : null;
-    if (matchingFileCol) {
-      columnMapping.set(pgCol, matchingFileCol); // Map PostgreSQL column to file column
-    }
-  });
-
   const BATCH_SIZE = 1000;
   const columnList = columns.map((col) => `"${col}"`).join(', ');
-
-  // Fetch the PostgreSQL table schema to detect which columns are JSON
-  const pgSchema: { column: string; type: string }[] = await getPgTableSchema(pgClient, tableName);
-
-  // Quoting the table name in the query
-  const quotedTableName = `"${tableName}"`;  // Properly quote the table name
 
   for (let i = 0; i < data.length; i += BATCH_SIZE) {
     const batch = data.slice(i, i + BATCH_SIZE);
@@ -433,23 +441,32 @@ async function importData(pgClient: PgPoolClient, tableName: string, columns: st
       .map((row) =>
         `(${columns
           .map((col) => {
-            const fileCol = columnMapping.get(col) || col;  // Use mapped file column
-            const columnType = pgSchema.find((c) => c.column === col)?.type;
-
-            // Handle JSON fields
-            if (columnType === 'json' || columnType === 'jsonb') {
-              // Make sure the JSON data is stringified
-              return row[fileCol] !== undefined ? `'${JSON.stringify(row[fileCol])}'` : 'NULL';
+            let value = row[col];
+            if (value === undefined || value === null) {
+              return 'NULL'; // Handle NULL values
             }
-
-            return row[fileCol] !== undefined ? `'${row[fileCol]}'` : 'NULL';
+            if (typeof value === 'object') {
+              // If the value is an object, it's likely JSON, so stringify it
+              return `'${JSON.stringify(value)}'`;
+            } else if (typeof value === 'string' && value.trim().startsWith('{') && value.trim().endsWith('}')) {
+              // Check if the string is already a JSON string
+              try {
+                JSON.parse(value);
+                return `'${value}'`;
+              } catch {
+                return `'${value.replace(/'/g, "''")}'`; // Escape single quotes
+              }
+            } else {
+              // Handle regular string and numeric values, escaping single quotes
+              return `'${value.toString().replace(/'/g, "''")}'`;
+            }
           })
           .join(', ')})`
       )
       .join(', ');
 
     const insertQuery = `
-      INSERT INTO ${quotedTableName} (${columnList})
+      INSERT INTO "${tableName}" (${columnList})
       VALUES ${valuesList}
       ON CONFLICT DO NOTHING;
     `;
@@ -464,8 +481,6 @@ async function importData(pgClient: PgPoolClient, tableName: string, columns: st
   }
   logger.info(`Data imported successfully into table "${tableName}".`);
 }
-
-
 
 // ============================
 /* Step 10: Main Function */
@@ -544,9 +559,6 @@ async function main(): Promise<void> {
   // Exit the process cleanly
   process.exit(0);
 }
-
-
-
 
 // ============================
 /* Step 11: Execute the Main Function */
