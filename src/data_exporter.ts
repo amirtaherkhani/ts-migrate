@@ -4,7 +4,6 @@ import { createObjectCsvWriter } from 'csv-writer';
 import fs from 'fs';
 import path from 'path';
 import winston from 'winston';
-import { execSync } from 'child_process';
 import chalk from 'chalk';
 
 dotenv.config();
