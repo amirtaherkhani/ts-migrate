@@ -5,10 +5,9 @@
   "main": "index.js",
   "license": "MIT",
   "scripts": {
-    "data:export": "ts-node ./src/data_extractor.ts",
+    "data:export": "ts-node ./src/data_exporter.ts",
     "schema:mysql": "ts-node ./src/schema_descriptor.ts",
-    "data:import": "ts-node ./src/data_importer.ts",
-    "data:bridge": "ts-node ./src/pgsql_pipeline.ts"
+    "data:import": "ts-node ./src/data_importer.ts"
   },
   "dependencies": {
     "@fast-csv/format": "^5.0.0",
@@ -25,6 +24,7 @@
     "p-limit": "3",
     "pg": "^8.13.0",
     "pg-copy-streams": "^6.0.6",
+    "pg-protocol": "^1.7.0",
     "reflect-metadata": "^0.2.2",
     "ts-node": "^10.9.2",
     "typeorm": "^0.3.20",
