@@ -58,6 +58,7 @@ const pgPool = new PgPool({
   password: process.env.PG_PASS,
   database: process.env.PG_DB_NAME,
   port: Number(process.env.PG_PORT),
+  ssl: { rejectUnauthorized: false } // Force SSL and allow self-signed certificates
 });
 
 const mysqlPool = mysql.createPool({
